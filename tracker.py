@@ -45,3 +45,40 @@ def handle_announce(path, peer_ip):
         peers.append({"peer_id": peer_id, "ip": peer_ip, "port": peer_port})
 
     return 200, {"interval": INTERVAL, "peers": peers}
+
+def read_http_request(socket):
+    """Read an HTTP request from a TCP socket and return the request method and path/URL."""
+
+    data = b""
+
+    while b"\r\n\r\n" not in data:  # Double CRLF indicates end of headers in an HTTP request message
+        chunk = socket.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > 8192:  # Limit to 8 KB
+            break
+
+    if not data:
+        return None, None
+
+    # Decode the HTTP request
+    try:
+        request_text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, None
+
+    # Parse the HTTP request line
+    request_lines = request_text.split("\r\n")  # First CRLF separates request line from headers
+    if not request_lines:
+        return None, None
+
+    request_line = request_lines[0]
+    parts = request_line.split()
+    if len(parts) < 2:
+        return None, None
+
+    method = parts[0]
+    path = parts[1]
+
+    return method, path
