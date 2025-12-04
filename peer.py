@@ -3,28 +3,80 @@ import socket
 import threading
 import struct
 
+# Custom, BitTorrent-like message types ------
 MESSAGE_HANDSHAKE = 1
+MESSAGE_BITFIELD = 2
+MESSAGE_REQUEST = 3
+MESSAGE_PIECE = 4
+MESSAGE_HAVE = 5
+MESSAGE_KEEPALIVE = 6
 
 class TorrentMetadata:
     def __init__(self):
         self.info_hash = "my-dummy-info-hash"  # TODO: Replace with actual info hash
 
+class PieceManager:
+    """Track which pieces a peer has and generate a bitfield."""
+
+    def __init__(self, num_pieces: int):
+        self.num_pieces = num_pieces
+        # True if we have the piece at that index
+        self.have = [False] * num_pieces  # Start off as a leecher
+
+    def mark_have(self, index: int) -> None:
+        if 0 <= index < self.num_pieces:
+            self.have[index] = True
+
+    def bitfield_bytes(self) -> bytes:
+        """Return a compact bitfield: 1 bit per piece (MSB-first)."""
+        bits = []
+        for have_piece in self.have:
+            bits.append('1' if have_piece else '0')
+        # Pad to a multiple of 8 bits
+        while len(bits) % 8 != 0:
+            bits.append('0')
+        result = bytearray()
+        for i in range(0, len(bits), 8):
+            byte_bits = ''.join(bits[i:i+8])
+            result.append(int(byte_bits, 2))
+        return bytes(result)
+
+    @staticmethod
+    def parse_bitfield(b: bytes, num_pieces: int) -> list[bool]:
+        """Parse a bitfield bytes object into a list of booleans of length num_pieces."""
+        if not b or num_pieces <= 0:
+            return [False] * max(num_pieces, 0)
+        # Convert bytes -> bit string
+        bits = bin(int.from_bytes(b, byteorder="big"))[2:]
+        # Left-pad with zeros so we have 8 * len(b) bits
+        bits = bits.zfill(len(b) * 8)
+        # Take only the first num_pieces bits
+        result = []
+        for i in range(num_pieces):
+            result.append(bits[i] == '1')
+        return result
+
 class PeerConnection(threading.Thread):
-    def __init__(self, client_conn, client_ip, server_metadata, server_peer_id):
+    def __init__(self, client_conn, client_ip, server_metadata, server_peer_id, piece_manager):
         super().__init__(daemon=True)
 
         self.client_conn = client_conn
         self.client_ip = client_ip
         self.server_metadata = server_metadata
         self.server_peer_id = server_peer_id
+        self.piece_manager = piece_manager
+
         self.remote_peer_id = None  # Client peer ID
+        self.remote_have: list[bool] | None = None
 
     def run(self):
         print(f"[Peer server {self.server_peer_id}] [Peer connection] Started for remote peer {self.client_ip}")
 
         try:
+            # Handshake phase ------
             message_type, payload = receive_message(self.client_conn)
-            if message_type != MESSAGE_HANDSHAKE or payload is None or len(payload) < 40:  # 20 bytes info_hash + 20 bytes peer_id, TODO change if needed
+            if message_type != MESSAGE_HANDSHAKE or payload is None or len(payload) < 40:
+                # 20 bytes info_hash + 20 bytes peer_id, TODO change if needed
                 print(f"[Peer server {self.server_peer_id}] [Peer connection] Invalid handshake from remote peer {self.client_ip}")
                 return
 
@@ -34,7 +86,9 @@ class PeerConnection(threading.Thread):
             remote_info_hash = info_hash_bytes.decode("utf-8", errors="ignore").rstrip("_")
             self.remote_peer_id = remote_peer_id_bytes.decode("utf-8", errors="ignore").rstrip("_")
 
-            print(f"[Peer server {self.server_peer_id}] [Peer connection] Got handshake from remote peer {self.remote_peer_id}, info hash: {remote_info_hash}")
+            print(
+                f"[Peer server {self.server_peer_id}] [Peer connection] Got handshake from remote peer {self.remote_peer_id}, info hash: {remote_info_hash}"
+            )
 
             if remote_info_hash != self.server_metadata.info_hash:
                 print(f"[Peer server {self.server_peer_id}] [Peer connection] Info hash mismatch, closing...")
@@ -45,10 +99,51 @@ class PeerConnection(threading.Thread):
             handshake_payload = my_info_hash_bytes + my_peer_id_bytes
 
             send_message(self.client_conn, MESSAGE_HANDSHAKE, handshake_payload)
-            
+
             print(f"[Peer server {self.server_peer_id}] [Peer connection] Handshake complete with {self.remote_peer_id}")
 
-            # TODO: bitfield, message loop, pieces
+            # NOTE: For now, PieceManager is initialized elsewhere with a fixed num_pieces
+            local_bitfield = self.piece_manager.bitfield_bytes()
+            if local_bitfield:
+                send_message(self.client_conn, MESSAGE_BITFIELD, local_bitfield)
+                print(f"[Peer server {self.server_peer_id}] [Peer connection] Sent bitfield to remote peer {self.remote_peer_id}")
+
+            # Message loop ------
+            while True:
+                message_type, payload = receive_message(self.client_conn)
+                if message_type is None:  # Connection closed or error
+                    print(f"[Peer server {self.server_peer_id}] [Peer connection] Remote {self.client_ip} closed connection")
+                    break
+
+                if message_type == MESSAGE_KEEPALIVE:
+                    continue
+
+                if message_type == MESSAGE_BITFIELD:
+                    self.remote_have = PieceManager.parse_bitfield(payload, self.piece_manager.num_pieces)
+                    print(
+                        f"[Peer server {self.server_peer_id}] [Peer connection] Received bitfield from {self.remote_peer_id}: "
+                        f"{sum(self.remote_have or [])} pieces available"
+                    )
+                    continue
+
+                if message_type == MESSAGE_HAVE:
+                    if len(payload) >= 4:
+                        (piece_index,) = struct.unpack("!I", payload[:4])
+                        if self.remote_have is None and self.piece_manager.num_pieces > 0:
+                            self.remote_have = [False] * self.piece_manager.num_pieces
+                        if self.remote_have is not None and 0 <= piece_index < len(self.remote_have):
+                            self.remote_have[piece_index] = True
+                        print(
+                            f"[Peer server {self.server_peer_id}] [Peer connection] Remote {self.remote_peer_id} now has piece {piece_index}"
+                        )
+                    continue
+
+                # TODO: Handle other message types (REQUEST, PIECE)
+
+                print(
+                    f"[Peer server {self.server_peer_id}] [Peer connection] Received message type {message_type} "
+                    f"from {self.remote_peer_id} with payload length {0 if payload is None else len(payload)}"
+                )
 
         except Exception as e:
             print(f"[Peer server {self.server_peer_id}] [Peer connection] Error handling remote {self.client_ip}: {e}")
@@ -57,12 +152,13 @@ class PeerConnection(threading.Thread):
             print(f"[Peer server {self.server_peer_id}] [Peer connection] Closed connection with remote {self.client_ip}")
 
 class PeerServer:
-    def __init__(self, ip, port, metadata, peer_id):
+    def __init__(self, ip, port, metadata, peer_id, piece_manager):
         self.ip = ip
         self.port = port
         self.metadata = metadata
         self.peer_id = peer_id
-        
+        self.piece_manager = piece_manager
+
         self.running = False
         self.server_socket = None
 
@@ -88,7 +184,13 @@ class PeerServer:
             while self.running:
                 conn, addr = s.accept()
                 print(f"[{self.peer_id}] [Peer server] Incoming connection from {addr}")
-                peer_connection = PeerConnection(client_conn=conn, client_ip=addr, server_metadata=self.metadata, server_peer_id=self.peer_id)
+                peer_connection = PeerConnection(
+                    client_conn=conn,
+                    client_ip=addr,
+                    server_metadata=self.metadata,
+                    server_peer_id=self.peer_id,
+                    piece_manager=self.piece_manager,
+                )
                 peer_connection.start()
     
     def stop(self):
@@ -102,10 +204,14 @@ class PeerServer:
 
 
 def send_message(sock: socket.socket, message_type: int, payload: bytes):
-    """Send a length-prefixed message: [4-byte length][1-byte type][payload]."""
+    """Send a length-prefixed message: [4-byte length][1-byte type][payload].
+
+    The length field counts the type byte plus the payload bytes.
+    """
     length = 1 + len(payload)
-    header = struct.pack("!I", length) + bytes([message_type])
-    sock.sendall(header + payload)
+    header = struct.pack("!I", length)  # length of (type + payload)
+    type_byte = bytes([message_type])
+    sock.sendall(header + type_byte + payload)
 
 
 def receive_exact(sock: socket.socket, n: int) -> bytes | None:
