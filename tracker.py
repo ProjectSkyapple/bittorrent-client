@@ -99,5 +99,43 @@ def send_http_response(socket, status_code, body_dict):
         body_json
     ]
     response_text = "\r\n".join(response_lines)
-    
+
     socket.sendall(response_text.encode("utf-8"))
+
+def run_tracker(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        s.bind(("0.0.0.0", port))
+        s.listen(50)
+        
+        print(f"RUNNING: Tracker listening on 0.0.0.0:{port}!")
+
+        while True:
+            conn, addr = s.accept()
+            client_ip, _ = addr
+            with conn:
+                method, path = read_http_request(conn)
+                if method != "GET" or path is None:
+                    send_http_response(conn, 400, {"error": "bad request"})
+                    continue
+
+                parsed = urlparse(path)
+                if parsed.path != "/announce":
+                    send_http_response(conn, 404, {"error": "not found"})
+                    continue
+
+                status, body = handle_announce(path, client_ip)
+                send_http_response(conn, status, body)
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <port>")
+        sys.exit(1)
+    port = int(sys.argv[1])
+    run_tracker(port)
+
+
+if __name__ == "__main__":
+    main()
