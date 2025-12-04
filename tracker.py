@@ -82,3 +82,22 @@ def read_http_request(socket):
     path = parts[1]
 
     return method, path
+
+def send_http_response(socket, status_code, body_dict):
+    """Send an HTTP response with the given status code and JSON body."""
+
+    reasons = {200: "OK", 400: "Bad Request", 404: "Not Found"}
+    reason = reasons.get(status_code, "Unknown")
+
+    body_json = json.dumps(body_dict)
+    response_lines = [
+        f"HTTP/1.1 {status_code} {reason}",
+        "Content-Type: application/json",
+        f"Content-Length: {len(body_json)}",
+        "Connection: close",  # Server will close connection
+        "",
+        body_json
+    ]
+    response_text = "\r\n".join(response_lines)
+    
+    socket.sendall(response_text.encode("utf-8"))
