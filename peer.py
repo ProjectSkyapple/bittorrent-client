@@ -70,6 +70,20 @@ class PeerConnection(threading.Thread):
         self.remote_peer_id = None  # Remote peer ID
         self.remote_have = None
 
+    def _local_info_hash_bytes(self):
+        """Return the 20-byte info-hash for this connection.
+
+        Assumes server_metadata is a TorrentMetadata instance with an
+        info_hash_bytes attribute of length 20.
+        """
+        ih_bytes = self.server_metadata.info_hash_bytes
+        # TorrentMetadata guarantees 20-byte info_hash_bytes, but we slice for safety
+        return bytes(ih_bytes[:20])
+
+    def _local_info_hash_hex(self):
+        """Return a hex string for logging the local info-hash."""
+        return self.server_metadata.info_hash_hex
+
     def request_piece(self, piece_index):
         """Send a simple piece request to the remote peer
 
@@ -104,20 +118,22 @@ class PeerConnection(threading.Thread):
                 info_hash_bytes = payload[:20]
                 remote_peer_id_bytes = payload[20:40]
 
-                remote_info_hash = info_hash_bytes.decode("utf-8", errors="ignore").rstrip("_")
+                # Remote peer's info-hash as hex for logging
+                remote_info_hash_hex = info_hash_bytes.hex()
                 self.remote_peer_id = remote_peer_id_bytes.decode("utf-8", errors="ignore").rstrip("_")
 
                 print(
                     f"[Peer {self.server_peer_id}] [Peer connection] Got incoming handshake from {self.remote_peer_id}, "
-                    f"info hash: {remote_info_hash}"
+                    f"info hash: {remote_info_hash_hex}"
                 )
 
-                if remote_info_hash != self.server_metadata.info_hash:
+                local_info_hash_bytes = self._local_info_hash_bytes()
+                if info_hash_bytes != local_info_hash_bytes:
                     print(f"[Peer {self.server_peer_id}] [Peer connection] Info hash mismatch, closing...")
                     return
 
                 # Send our handshake response back to the remote peer
-                my_info_hash_bytes = self.server_metadata.info_hash.encode("utf-8")[:20].ljust(20, b"_")  # TODO: real BitTorrent-style handshake
+                my_info_hash_bytes = local_info_hash_bytes
                 my_peer_id_bytes = self.server_peer_id.encode("utf-8")[:20].ljust(20, b"_")
                 handshake_payload = my_info_hash_bytes + my_peer_id_bytes
                 send_message(self.client_conn, MESSAGE_HANDSHAKE, handshake_payload)
@@ -126,7 +142,8 @@ class PeerConnection(threading.Thread):
 
             else:
                 # Outgoing connection: we initiate the handshake.
-                my_info_hash_bytes = self.server_metadata.info_hash.encode("utf-8")[:20].ljust(20, b"_")
+                local_info_hash_bytes = self._local_info_hash_bytes()
+                my_info_hash_bytes = local_info_hash_bytes
                 my_peer_id_bytes = self.server_peer_id.encode("utf-8")[:20].ljust(20, b"_")
                 handshake_payload = my_info_hash_bytes + my_peer_id_bytes
                 send_message(self.client_conn, MESSAGE_HANDSHAKE, handshake_payload)
@@ -144,15 +161,15 @@ class PeerConnection(threading.Thread):
                 info_hash_bytes = payload[:20]
                 remote_peer_id_bytes = payload[20:40]
 
-                remote_info_hash = info_hash_bytes.decode("utf-8", errors="ignore").rstrip("_")
+                remote_info_hash_hex = info_hash_bytes.hex()
                 self.remote_peer_id = remote_peer_id_bytes.decode("utf-8", errors="ignore").rstrip("_")
 
                 print(
                     f"[Peer {self.server_peer_id}] [Peer connection] Got handshake response from {self.remote_peer_id}, "
-                    f"info hash: {remote_info_hash}"
+                    f"info hash: {remote_info_hash_hex}"
                 )
 
-                if remote_info_hash != self.server_metadata.info_hash:
+                if info_hash_bytes != local_info_hash_bytes:
                     print(f"[Peer {self.server_peer_id}] [Peer connection] Info hash mismatch (outgoing), closing...")
                     return
 
@@ -287,7 +304,16 @@ class PeerServer:
             print(f"[{self.peer_id}] [Peer server] Listening on {self.ip}:{self.port}")
 
             while self.running:
-                conn, addr = s.accept()
+                try:
+                    conn, addr = s.accept()
+                except OSError as e:
+                    # This typically happens when the socket is closed in stop()
+                    if not self.running:
+                        print(f"[{self.peer_id}] [Peer server] accept() aborted after stop(), exiting server loop")
+                        break
+                    print(f"[{self.peer_id}] [Peer server] Error in accept(): {e}")
+                    break
+
                 print(f"[{self.peer_id}] [Peer server] Incoming connection from {addr}")
                 peer_connection = PeerConnection(
                     client_conn=conn,
