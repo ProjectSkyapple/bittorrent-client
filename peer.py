@@ -57,62 +57,106 @@ class PieceManager:
         return result
 
 class PeerConnection(threading.Thread):
-    def __init__(self, client_conn, client_ip, server_metadata, server_peer_id, piece_manager):
+    def __init__(self, client_conn, client_addr, server_metadata, server_peer_id, piece_manager, is_incoming: bool = True):
         super().__init__(daemon=True)
 
         self.client_conn = client_conn
-        self.client_ip = client_ip
+        self.client_addr = client_addr  # (ip, port)
         self.server_metadata = server_metadata
         self.server_peer_id = server_peer_id
         self.piece_manager = piece_manager
+        self.is_incoming = is_incoming
 
-        self.remote_peer_id = None  # Client peer ID
+        self.remote_peer_id = None  # Remote peer ID
         self.remote_have: list[bool] | None = None
 
     def run(self):
-        print(f"[Peer server {self.server_peer_id}] [Peer connection] Started for remote peer {self.client_ip}")
+        print(f"[Peer {self.server_peer_id}] [Peer connection] Started for remote peer {self.client_addr}")
 
         try:
             # Handshake phase ------
-            message_type, payload = receive_message(self.client_conn)
-            if message_type != MESSAGE_HANDSHAKE or payload is None or len(payload) < 40:
-                # 20 bytes info_hash + 20 bytes peer_id, TODO change if needed
-                print(f"[Peer server {self.server_peer_id}] [Peer connection] Invalid handshake from remote peer {self.client_ip}")
-                return
+            if self.is_incoming:
+                # Incoming connection: remote peer initiates the handshake.
+                message_type, payload = receive_message(self.client_conn)
+                if message_type != MESSAGE_HANDSHAKE or payload is None or len(payload) < 40:
+                    # 20 bytes info_hash + 20 bytes peer_id, TODO change if needed
+                    print(
+                        f"[Peer {self.server_peer_id}] [Peer connection] Invalid incoming handshake from {self.client_addr}"
+                    )
+                    return
 
-            info_hash_bytes = payload[:20]
-            remote_peer_id_bytes = payload[20:40]
+                info_hash_bytes = payload[:20]
+                remote_peer_id_bytes = payload[20:40]
 
-            remote_info_hash = info_hash_bytes.decode("utf-8", errors="ignore").rstrip("_")
-            self.remote_peer_id = remote_peer_id_bytes.decode("utf-8", errors="ignore").rstrip("_")
+                remote_info_hash = info_hash_bytes.decode("utf-8", errors="ignore").rstrip("_")
+                self.remote_peer_id = remote_peer_id_bytes.decode("utf-8", errors="ignore").rstrip("_")
 
-            print(
-                f"[Peer server {self.server_peer_id}] [Peer connection] Got handshake from remote peer {self.remote_peer_id}, info hash: {remote_info_hash}"
-            )
+                print(
+                    f"[Peer {self.server_peer_id}] [Peer connection] Got incoming handshake from {self.remote_peer_id}, "
+                    f"info hash: {remote_info_hash}"
+                )
 
-            if remote_info_hash != self.server_metadata.info_hash:
-                print(f"[Peer server {self.server_peer_id}] [Peer connection] Info hash mismatch, closing...")
-                return
+                if remote_info_hash != self.server_metadata.info_hash:
+                    print(f"[Peer {self.server_peer_id}] [Peer connection] Info hash mismatch, closing...")
+                    return
 
-            my_info_hash_bytes = self.server_metadata.info_hash.encode("utf-8")[:20].ljust(20, b"_")  # TODO: Use real BitTorrent-style handshake message format
-            my_peer_id_bytes = self.server_peer_id.encode("utf-8")[:20].ljust(20, b"_")
-            handshake_payload = my_info_hash_bytes + my_peer_id_bytes
+                # Send our handshake response back to the remote peer
+                my_info_hash_bytes = self.server_metadata.info_hash.encode("utf-8")[:20].ljust(20, b"_")  # TODO: real BitTorrent-style handshake
+                my_peer_id_bytes = self.server_peer_id.encode("utf-8")[:20].ljust(20, b"_")
+                handshake_payload = my_info_hash_bytes + my_peer_id_bytes
+                send_message(self.client_conn, MESSAGE_HANDSHAKE, handshake_payload)
 
-            send_message(self.client_conn, MESSAGE_HANDSHAKE, handshake_payload)
+                print(f"[Peer {self.server_peer_id}] [Peer connection] Handshake (incoming) complete with {self.remote_peer_id}")
 
-            print(f"[Peer server {self.server_peer_id}] [Peer connection] Handshake complete with {self.remote_peer_id}")
+            else:
+                # Outgoing connection: we initiate the handshake.
+                my_info_hash_bytes = self.server_metadata.info_hash.encode("utf-8")[:20].ljust(20, b"_")
+                my_peer_id_bytes = self.server_peer_id.encode("utf-8")[:20].ljust(20, b"_")
+                handshake_payload = my_info_hash_bytes + my_peer_id_bytes
+                send_message(self.client_conn, MESSAGE_HANDSHAKE, handshake_payload)
+                print(
+                    f"[Peer {self.server_peer_id}] [Peer connection] Sent outgoing handshake to {self.client_addr}"
+                )
 
-            # NOTE: For now, PieceManager is initialized elsewhere with a fixed num_pieces
+                message_type, payload = receive_message(self.client_conn)
+                if message_type != MESSAGE_HANDSHAKE or payload is None or len(payload) < 40:
+                    print(
+                        f"[Peer {self.server_peer_id}] [Peer connection] Invalid handshake response from {self.client_addr}"
+                    )
+                    return
+
+                info_hash_bytes = payload[:20]
+                remote_peer_id_bytes = payload[20:40]
+
+                remote_info_hash = info_hash_bytes.decode("utf-8", errors="ignore").rstrip("_")
+                self.remote_peer_id = remote_peer_id_bytes.decode("utf-8", errors="ignore").rstrip("_")
+
+                print(
+                    f"[Peer {self.server_peer_id}] [Peer connection] Got handshake response from {self.remote_peer_id}, "
+                    f"info hash: {remote_info_hash}"
+                )
+
+                if remote_info_hash != self.server_metadata.info_hash:
+                    print(f"[Peer {self.server_peer_id}] [Peer connection] Info hash mismatch (outgoing), closing...")
+                    return
+
+                print(f"[Peer {self.server_peer_id}] [Peer connection] Handshake (outgoing) complete with {self.remote_peer_id}")
+
+            # After a successful handshake (incoming or outgoing), send our bitfield.
             local_bitfield = self.piece_manager.bitfield_bytes()
             if local_bitfield:
                 send_message(self.client_conn, MESSAGE_BITFIELD, local_bitfield)
-                print(f"[Peer server {self.server_peer_id}] [Peer connection] Sent bitfield to remote peer {self.remote_peer_id}")
+                print(
+                    f"[Peer {self.server_peer_id}] [Peer connection] Sent bitfield to remote peer {self.remote_peer_id}"
+                )
 
             # Message loop ------
             while True:
                 message_type, payload = receive_message(self.client_conn)
                 if message_type is None:  # Connection closed or error
-                    print(f"[Peer server {self.server_peer_id}] [Peer connection] Remote {self.client_ip} closed connection")
+                    print(
+                        f"[Peer {self.server_peer_id}] [Peer connection] Remote {self.client_addr} closed connection"
+                    )
                     break
 
                 if message_type == MESSAGE_KEEPALIVE:
@@ -121,7 +165,7 @@ class PeerConnection(threading.Thread):
                 if message_type == MESSAGE_BITFIELD:
                     self.remote_have = PieceManager.parse_bitfield(payload, self.piece_manager.num_pieces)
                     print(
-                        f"[Peer server {self.server_peer_id}] [Peer connection] Received bitfield from {self.remote_peer_id}: "
+                        f"[Peer {self.server_peer_id}] [Peer connection] Received bitfield from {self.remote_peer_id}: "
                         f"{sum(self.remote_have or [])} pieces available"
                     )
                     continue
@@ -134,22 +178,22 @@ class PeerConnection(threading.Thread):
                         if self.remote_have is not None and 0 <= piece_index < len(self.remote_have):
                             self.remote_have[piece_index] = True
                         print(
-                            f"[Peer server {self.server_peer_id}] [Peer connection] Remote {self.remote_peer_id} now has piece {piece_index}"
+                            f"[Peer {self.server_peer_id}] [Peer connection] Remote {self.remote_peer_id} now has piece {piece_index}"
                         )
                     continue
 
                 # TODO: Handle other message types (REQUEST, PIECE)
 
                 print(
-                    f"[Peer server {self.server_peer_id}] [Peer connection] Received message type {message_type} "
+                    f"[Peer {self.server_peer_id}] [Peer connection] Received message type {message_type} "
                     f"from {self.remote_peer_id} with payload length {0 if payload is None else len(payload)}"
                 )
 
         except Exception as e:
-            print(f"[Peer server {self.server_peer_id}] [Peer connection] Error handling remote {self.client_ip}: {e}")
+            print(f"[Peer {self.server_peer_id}] [Peer connection] Error handling remote {self.client_addr}: {e}")
         finally:
             self.client_conn.close()
-            print(f"[Peer server {self.server_peer_id}] [Peer connection] Closed connection with remote {self.client_ip}")
+            print(f"[Peer {self.server_peer_id}] [Peer connection] Closed connection with remote {self.client_addr}")
 
 class PeerServer:
     def __init__(self, ip, port, metadata, peer_id, piece_manager):
@@ -186,10 +230,11 @@ class PeerServer:
                 print(f"[{self.peer_id}] [Peer server] Incoming connection from {addr}")
                 peer_connection = PeerConnection(
                     client_conn=conn,
-                    client_ip=addr,
+                    client_addr=addr,
                     server_metadata=self.metadata,
                     server_peer_id=self.peer_id,
                     piece_manager=self.piece_manager,
+                    is_incoming=True,
                 )
                 peer_connection.start()
     
@@ -202,6 +247,25 @@ class PeerServer:
         if self.server_socket:
             self.server_socket.close()
 
+
+def connect_to_peer(ip: str, port: int, metadata: TorrentMetadata, peer_id: str, piece_manager: PieceManager) -> PeerConnection:
+    """Establish an outgoing TCP connection to another peer and wrap it in a PeerConnection.
+
+    This will connect(), perform the outgoing handshake inside PeerConnection.run(),
+    send our bitfield, and then enter the message loop.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((ip, port))
+    peer_connection = PeerConnection(
+        client_conn=sock,
+        client_addr=(ip, port),  # TODO: Change client_addr name to remote_addr to avoid confusion
+        server_metadata=metadata,  # TODO: Change server_... variable names to local_... to avoid confusion
+        server_peer_id=peer_id,
+        piece_manager=piece_manager,
+        is_incoming=False,
+    )
+    peer_connection.start()
+    return peer_connection
 
 def send_message(sock: socket.socket, message_type: int, payload: bytes):
     """Send a length-prefixed message: [4-byte length][1-byte type][payload].
