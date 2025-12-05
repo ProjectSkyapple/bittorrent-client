@@ -100,6 +100,34 @@ class PeerConnection(threading.Thread):
                 f"[Peer {self.server_peer_id}] [Peer connection] Failed to send REQUEST for piece {piece_index}: {e}"
             )
 
+    def send_have(self, piece_index):
+        """Notify the remote peer that we now have a given piece.
+
+        Payload format: 4-byte big-endian piece index.
+        """
+        try:
+            payload = struct.pack("!I", piece_index)
+            send_message(self.client_conn, MESSAGE_HAVE, payload)
+            print(
+                f"[Peer {self.server_peer_id}] [Peer connection] Sent HAVE for piece {piece_index} to {self.remote_peer_id or self.client_addr}"
+            )
+        except Exception as e:
+            print(
+                f"[Peer {self.server_peer_id}] [Peer connection] Failed to send HAVE for piece {piece_index}: {e}"
+            )
+
+    def send_keepalive(self):
+        """Send a KEEPALIVE message to keep the connection open."""
+        try:
+            send_message(self.client_conn, MESSAGE_KEEPALIVE, b"")
+            print(
+                f"[Peer {self.server_peer_id}] [Peer connection] Sent KEEPALIVE to {self.remote_peer_id or self.client_addr}"
+            )
+        except Exception as e:
+            print(
+                f"[Peer {self.server_peer_id}] [Peer connection] Failed to send KEEPALIVE: {e}"
+            )
+
     def run(self):
         print(f"[Peer {self.server_peer_id}] [Peer connection] Started for remote peer {self.client_addr}")
 
@@ -253,6 +281,8 @@ class PeerConnection(threading.Thread):
                                 print(
                                     f"[Peer {self.server_peer_id}] [Peer connection] Stored piece {piece_index} and marked as have"
                                 )
+                                # Inform the remote peer that we now have this piece.
+                                self.send_have(piece_index)
                             else:
                                 print(
                                     f"[Peer {self.server_peer_id}] [Peer connection] Failed to store piece {piece_index}"
