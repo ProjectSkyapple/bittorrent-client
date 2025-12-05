@@ -18,16 +18,16 @@ class TorrentMetadata:
 class PieceManager:
     """Track which pieces a peer has and generate a bitfield."""
 
-    def __init__(self, num_pieces: int):
+    def __init__(self, num_pieces):
         self.num_pieces = num_pieces
         # True if we have the piece at that index
         self.have = [False] * num_pieces  # Start off as a leecher
 
-    def mark_have(self, index: int) -> None:
+    def mark_have(self, index):
         if 0 <= index < self.num_pieces:
             self.have[index] = True
 
-    def bitfield_bytes(self) -> bytes:
+    def bitfield_bytes(self):
         """Return a compact bitfield: 1 bit per piece (MSB-first)."""
         bits = []
         for have_piece in self.have:
@@ -42,7 +42,7 @@ class PieceManager:
         return bytes(result)
 
     @staticmethod
-    def parse_bitfield(b: bytes, num_pieces: int) -> list[bool]:
+    def parse_bitfield(b, num_pieces):
         """Parse a bitfield bytes object into a list of booleans of length num_pieces."""
         if not b or num_pieces <= 0:
             return [False] * max(num_pieces, 0)
@@ -57,28 +57,28 @@ class PieceManager:
         return result
 
 class FileManager:
-    def __init__(self, num_pieces: int, piece_size: int):
+    def __init__(self, num_pieces, piece_size):
         self.num_pieces = num_pieces
         self.piece_size = piece_size
         # None means we don't have the piece yet
-        self._pieces: list[bytes | None] = [None] * num_pieces
+        self._pieces = [None] * num_pieces
 
-    def has_piece(self, index: int) -> bool:
+    def has_piece(self, index):
         return 0 <= index < self.num_pieces and self._pieces[index] is not None
 
-    def read_piece(self, index: int) -> bytes | None:
+    def read_piece(self, index):
         if 0 <= index < self.num_pieces:
             return self._pieces[index]
         return None
 
-    def write_piece(self, index: int, data: bytes) -> bool:
+    def write_piece(self, index, data):
         if 0 <= index < self.num_pieces:
             self._pieces[index] = data
             return True
         return False
 
 class PeerConnection(threading.Thread):
-    def __init__(self, client_conn, client_addr, server_metadata, server_peer_id, piece_manager, is_incoming: bool = True, file_manager: FileManager | None = None):
+    def __init__(self, client_conn, client_addr, server_metadata, server_peer_id, piece_manager, is_incoming=True, file_manager=None):
         super().__init__(daemon=True)
 
         self.client_conn = client_conn
@@ -90,7 +90,23 @@ class PeerConnection(threading.Thread):
         self.file_manager = file_manager
 
         self.remote_peer_id = None  # Remote peer ID
-        self.remote_have: list[bool] | None = None
+        self.remote_have = None
+
+    def request_piece(self, piece_index):
+        """Send a simple piece request to the remote peer
+
+        Payload format: 4-byte big-endian piece index
+        """
+        try:
+            payload = struct.pack("!I", piece_index)
+            send_message(self.client_conn, MESSAGE_REQUEST, payload)
+            print(
+                f"[Peer {self.server_peer_id}] [Peer connection] Requested piece {piece_index} from {self.remote_peer_id or self.client_addr}"
+            )
+        except Exception as e:
+            print(
+                f"[Peer {self.server_peer_id}] [Peer connection] Failed to send REQUEST for piece {piece_index}: {e}"
+            )
 
     def run(self):
         print(f"[Peer {self.server_peer_id}] [Peer connection] Started for remote peer {self.client_addr}")
@@ -262,7 +278,7 @@ class PeerConnection(threading.Thread):
             print(f"[Peer {self.server_peer_id}] [Peer connection] Closed connection with remote {self.client_addr}")
 
 class PeerServer:
-    def __init__(self, ip, port, metadata, peer_id, piece_manager, file_manager: FileManager | None = None):
+    def __init__(self, ip, port, metadata, peer_id, piece_manager, file_manager=None):
         self.ip = ip
         self.port = port
         self.metadata = metadata
@@ -316,7 +332,7 @@ class PeerServer:
             self.server_socket.close()
 
 
-def connect_to_peer(ip: str, port: int, metadata: TorrentMetadata, peer_id: str, piece_manager: PieceManager, file_manager: FileManager | None = None) -> PeerConnection:
+def connect_to_peer(ip, port, metadata, peer_id, piece_manager, file_manager=None):
     """Establish an outgoing TCP connection to another peer and wrap it in a PeerConnection.
 
     This will connect(), perform the outgoing handshake inside PeerConnection.run(),
@@ -336,7 +352,7 @@ def connect_to_peer(ip: str, port: int, metadata: TorrentMetadata, peer_id: str,
     peer_connection.start()
     return peer_connection
 
-def send_message(sock: socket.socket, message_type: int, payload: bytes):
+def send_message(sock, message_type, payload):
     """Send a length-prefixed message: [4-byte length][1-byte type][payload].
 
     The length field counts the type byte plus the payload bytes.
@@ -347,7 +363,7 @@ def send_message(sock: socket.socket, message_type: int, payload: bytes):
     sock.sendall(header + type_byte + payload)
 
 
-def receive_exact(sock: socket.socket, n: int) -> bytes | None:
+def receive_exact(sock, n):
     """Read exactly n bytes from the socket or return None if closed."""
     buf = b""
     while len(buf) < n:
@@ -358,7 +374,7 @@ def receive_exact(sock: socket.socket, n: int) -> bytes | None:
     return buf
 
 
-def receive_message(sock: socket.socket):
+def receive_message(sock):
     """Receive one length-prefixed message and return (message_type, payload)."""
     length_packed = receive_exact(sock, 4) # First 4 bytes: length
     if not length_packed:
