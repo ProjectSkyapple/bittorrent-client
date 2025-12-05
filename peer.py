@@ -3,6 +3,9 @@ import socket
 import threading
 import struct
 
+from torrent_metadata import TorrentMetadata
+from file_manager import FileManager
+
 # Custom, BitTorrent-like message types ------
 MESSAGE_HANDSHAKE = 1
 MESSAGE_BITFIELD = 2
@@ -10,10 +13,6 @@ MESSAGE_REQUEST = 3
 MESSAGE_PIECE = 4
 MESSAGE_HAVE = 5
 MESSAGE_KEEPALIVE = 6
-
-class TorrentMetadata:
-    def __init__(self):
-        self.info_hash = "my-dummy-info-hash"  # TODO: Replace with actual info hash
 
 class PieceManager:
     """Track which pieces a peer has and generate a bitfield."""
@@ -55,27 +54,6 @@ class PieceManager:
         for i in range(num_pieces):
             result.append(bits[i] == '1')
         return result
-
-class FileManager:
-    def __init__(self, num_pieces, piece_size):
-        self.num_pieces = num_pieces
-        self.piece_size = piece_size
-        # None means we don't have the piece yet
-        self._pieces = [None] * num_pieces
-
-    def has_piece(self, index):
-        return 0 <= index < self.num_pieces and self._pieces[index] is not None
-
-    def read_piece(self, index):
-        if 0 <= index < self.num_pieces:
-            return self._pieces[index]
-        return None
-
-    def write_piece(self, index, data):
-        if 0 <= index < self.num_pieces:
-            self._pieces[index] = data
-            return True
-        return False
 
 class PeerConnection(threading.Thread):
     def __init__(self, client_conn, client_addr, server_metadata, server_peer_id, piece_manager, is_incoming=True, file_manager=None):
