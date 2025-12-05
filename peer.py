@@ -56,8 +56,29 @@ class PieceManager:
             result.append(bits[i] == '1')
         return result
 
+class FileManager:
+    def __init__(self, num_pieces: int, piece_size: int):
+        self.num_pieces = num_pieces
+        self.piece_size = piece_size
+        # None means we don't have the piece yet
+        self._pieces: list[bytes | None] = [None] * num_pieces
+
+    def has_piece(self, index: int) -> bool:
+        return 0 <= index < self.num_pieces and self._pieces[index] is not None
+
+    def read_piece(self, index: int) -> bytes | None:
+        if 0 <= index < self.num_pieces:
+            return self._pieces[index]
+        return None
+
+    def write_piece(self, index: int, data: bytes) -> bool:
+        if 0 <= index < self.num_pieces:
+            self._pieces[index] = data
+            return True
+        return False
+
 class PeerConnection(threading.Thread):
-    def __init__(self, client_conn, client_addr, server_metadata, server_peer_id, piece_manager, is_incoming: bool = True):
+    def __init__(self, client_conn, client_addr, server_metadata, server_peer_id, piece_manager, is_incoming: bool = True, file_manager: FileManager | None = None):
         super().__init__(daemon=True)
 
         self.client_conn = client_conn
@@ -66,6 +87,7 @@ class PeerConnection(threading.Thread):
         self.server_peer_id = server_peer_id
         self.piece_manager = piece_manager
         self.is_incoming = is_incoming
+        self.file_manager = file_manager
 
         self.remote_peer_id = None  # Remote peer ID
         self.remote_have: list[bool] | None = None
@@ -182,6 +204,50 @@ class PeerConnection(threading.Thread):
                         )
                     continue
 
+                if message_type == MESSAGE_REQUEST:
+                    # Remote peer is requesting a piece from us.
+                    if len(payload) >= 4:
+                        (piece_index,) = struct.unpack("!I", payload[:4])
+                        print(
+                            f"[Peer {self.server_peer_id}] [Peer connection] Remote {self.remote_peer_id} requested piece {piece_index}"
+                        )
+                        if self.file_manager is not None and self.file_manager.has_piece(piece_index):
+                            data = self.file_manager.read_piece(piece_index)
+                            if data is not None:
+                                piece_payload = struct.pack("!I", piece_index) + data
+                                send_message(self.client_conn, MESSAGE_PIECE, piece_payload)
+                                print(
+                                    f"[Peer {self.server_peer_id}] [Peer connection] Sent piece {piece_index} to {self.remote_peer_id}"
+                                )
+                        else:
+                            # For now, just log that we don't have the piece or no FileManager is attached.
+                            print(
+                                f"[Peer {self.server_peer_id}] [Peer connection] Cannot serve piece {piece_index} to {self.remote_peer_id}"
+                            )
+                    continue
+
+                if message_type == MESSAGE_PIECE:
+                    # We received a piece from the remote peer.
+                    if len(payload) >= 4:
+                        (piece_index,) = struct.unpack("!I", payload[:4])
+                        data = payload[4:]
+                        print(
+                            f"[Peer {self.server_peer_id}] [Peer connection] Received piece {piece_index} "
+                            f"(len={len(data)}) from {self.remote_peer_id}"
+                        )
+                        if self.file_manager is not None:
+                            ok = self.file_manager.write_piece(piece_index, data)
+                            if ok:
+                                self.piece_manager.mark_have(piece_index)
+                                print(
+                                    f"[Peer {self.server_peer_id}] [Peer connection] Stored piece {piece_index} and marked as have"
+                                )
+                            else:
+                                print(
+                                    f"[Peer {self.server_peer_id}] [Peer connection] Failed to store piece {piece_index}"
+                                )
+                    continue
+
                 # TODO: Handle other message types (REQUEST, PIECE)
 
                 print(
@@ -196,12 +262,13 @@ class PeerConnection(threading.Thread):
             print(f"[Peer {self.server_peer_id}] [Peer connection] Closed connection with remote {self.client_addr}")
 
 class PeerServer:
-    def __init__(self, ip, port, metadata, peer_id, piece_manager):
+    def __init__(self, ip, port, metadata, peer_id, piece_manager, file_manager: FileManager | None = None):
         self.ip = ip
         self.port = port
         self.metadata = metadata
         self.peer_id = peer_id
         self.piece_manager = piece_manager
+        self.file_manager = file_manager
 
         self.running = False
         self.server_socket = None
@@ -235,6 +302,7 @@ class PeerServer:
                     server_peer_id=self.peer_id,
                     piece_manager=self.piece_manager,
                     is_incoming=True,
+                    file_manager=self.file_manager,
                 )
                 peer_connection.start()
     
@@ -248,7 +316,7 @@ class PeerServer:
             self.server_socket.close()
 
 
-def connect_to_peer(ip: str, port: int, metadata: TorrentMetadata, peer_id: str, piece_manager: PieceManager) -> PeerConnection:
+def connect_to_peer(ip: str, port: int, metadata: TorrentMetadata, peer_id: str, piece_manager: PieceManager, file_manager: FileManager | None = None) -> PeerConnection:
     """Establish an outgoing TCP connection to another peer and wrap it in a PeerConnection.
 
     This will connect(), perform the outgoing handshake inside PeerConnection.run(),
@@ -263,6 +331,7 @@ def connect_to_peer(ip: str, port: int, metadata: TorrentMetadata, peer_id: str,
         server_peer_id=peer_id,
         piece_manager=piece_manager,
         is_incoming=False,
+        file_manager=file_manager,
     )
     peer_connection.start()
     return peer_connection
