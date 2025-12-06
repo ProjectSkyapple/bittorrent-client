@@ -13,7 +13,7 @@ class TorrentMetadata:
 
         # Most keys are bytes
         info = meta[b"info"]
-        # announce = meta[b"announce"]
+        announce = meta[b"announce"]
 
         # Compute info_hash (MUST be bencoded EXACTLY as stored)
         info_bencoded = bencodepy.encode(info)
@@ -21,7 +21,7 @@ class TorrentMetadata:
         self.info_hash_hex = self.info_hash_bytes.hex()
 
         # Tracker URL
-        # self.announce = announce.decode("utf-8")
+        self.announce = announce.decode("utf-8")
 
         # Single-file torrent fields
         self.name = info[b"name"].decode("utf-8")
