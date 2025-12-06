@@ -1,35 +1,40 @@
 #!/usr/bin/env python3
 import time
 
+from torrent_metadata import TorrentMetadata
+from file_manager import FileManager
 from peer import (
-    TorrentMetadata,
     PieceManager,
-    FileManager,
     PeerServer,
     connect_to_peer,
 )
 
-
-NUM_PIECES = 8
-PIECE_SIZE = 16  # bytes, arbitrary for demo
-
-
-def make_dummy_piece_data(index):
-    # Just some deterministic content per piece so we can recognize it
-    return f"piece-{index:02d}".encode("utf-8").ljust(PIECE_SIZE, b"_")
+# Paths for the demo. Adjust these to point to a real .torrent and its corresponding file.
+TORRENT_PATH = "./test_leecher_files/alice.torrent"          # TODO: set this to a real .torrent file
+SEEDER_FILE_PATH = "./test_seeder_files/alice.txt"  # The complete file that matches the torrent (for seeding)
+LEECHER_FILE_PATH = "./test_leecher_files/alice_download"  # Where the leecher will download to
 
 
 def main():
-    metadata = TorrentMetadata()
+    # Load real torrent metadata
+    metadata = TorrentMetadata(TORRENT_PATH)
+    print("[DEMO] Loaded torrent:", metadata)
 
-    seeder_pm = PieceManager(NUM_PIECES)
-    seeder_fm = FileManager(NUM_PIECES, PIECE_SIZE)
+    num_pieces = metadata.num_pieces
 
-    # Seeder has ALL pieces
-    for i in range(NUM_PIECES):
-        data = make_dummy_piece_data(i)
-        ok = seeder_fm.write_piece(i, data)
-        if ok:
+    # --- Seeder setup ---
+    seeder_pm = PieceManager(num_pieces)
+    seeder_fm = FileManager(SEEDER_FILE_PATH, metadata)
+
+    # Seeder: verify existing file and mark pieces as available.
+    # This assumes SEEDER_FILE_PATH already contains the complete file
+    # that matches the .torrent.
+    for i in range(num_pieces):
+        data = seeder_fm.read_piece(i)
+        if data is None:
+            continue
+        # Re-verify and mark have; write_piece will check SHA1 and update seeder_fm.have
+        if seeder_fm.write_piece(i, data):
             seeder_pm.mark_have(i)
 
     seeder_peer_id = "seeder-peer"
@@ -47,8 +52,9 @@ def main():
     # Give the server time to start listening
     time.sleep(0.2)
 
-    leecher_pm = PieceManager(NUM_PIECES)
-    leecher_fm = FileManager(NUM_PIECES, PIECE_SIZE)
+    # --- Leecher setup ---
+    leecher_pm = PieceManager(num_pieces)
+    leecher_fm = FileManager(LEECHER_FILE_PATH, metadata)
     leecher_peer_id = "leecher-peer"
 
     # Outgoing connection from leecher -> seeder
@@ -68,7 +74,7 @@ def main():
 
     # We'll repeatedly scan for missing pieces and request them
     # until we have all pieces or a timeout.
-    max_rounds = 50
+    max_rounds = 200
     round_delay = 0.1
 
     for round_no in range(max_rounds):
@@ -85,7 +91,7 @@ def main():
 
         # Pick one missing piece that the remote has.
         piece_to_request = None
-        for index in range(NUM_PIECES):
+        for index in range(num_pieces):
             if not leecher_pm.have[index] and conn.remote_have[index]:
                 piece_to_request = index
                 break
@@ -106,7 +112,7 @@ def main():
         print("[ENGINE] Download loop hit max_rounds without completing.")
 
     print("\n[ENGINE] Final leecher have[] =", leecher_pm.have)
-    for i in range(NUM_PIECES):
+    for i in range(num_pieces):
         data = leecher_fm.read_piece(i)
         print(f"[ENGINE] piece {i}: {data!r}")
 
