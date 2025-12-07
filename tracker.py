@@ -175,7 +175,10 @@ def run_tracker(port):
 
                 status, body = handle_announce(path, client_ip)
                 send_http_response(conn, status, body)
-                cleanup_peers()
+
+                conn.close()  # Tracker server will close connection as noted in HTTP response header
+
+                cleanup_peers()  # TODO: Should run on its own thread, need to synchronize access to torrents dict if done so
 
 
 def main():
