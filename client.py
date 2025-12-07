@@ -11,8 +11,7 @@ from torrent_metadata import TorrentMetadata
 from file_manager import FileManager
 from peer import PieceManager, PeerServer, connect_to_peer
 
-LISTEN_IP = "0.0.0.1"
-LISTEN_PORT = 6881  # fixed for simplicity
+LISTEN_PORT = None  # no longer used; per-client port is now CLI-driven
 
 
 def random_peer_id():
@@ -22,7 +21,7 @@ def random_peer_id():
     return prefix + suffix
 
 
-def announce_to_tracker(metadata, peer_id, port):
+def announce_to_tracker(metadata, peer_id, port, status = "started"):
     """Make an announce request to the project tracker and return a list of (ip, port) peers."""
     info_hash_bytes = metadata.info_hash_bytes
     announce_url = metadata.announce
@@ -36,7 +35,7 @@ def announce_to_tracker(metadata, peer_id, port):
         "uploaded": 0,
         "downloaded": 0,
         "left": metadata.length,
-        "status": "started",
+        "status": status,
     }
 
     encoded_params = []
@@ -76,16 +75,21 @@ def announce_to_tracker(metadata, peer_id, port):
         except (KeyError, ValueError, TypeError):
             continue
 
-    return peers
+    interval = int(decoded.get("interval", 30))
+    return peers, interval
 
 
 def main():
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} FILE.torrent OUTPUT_FILE")
+    if len(sys.argv) != 4:
+        print(f"Usage: {sys.argv[0]} LISTEN_PORT FILE.torrent OUTPUT_FILE")
         sys.exit(1)
 
-    torrent_path = sys.argv[1]
-    output_path = sys.argv[2]
+    listen_port = int(sys.argv[1])
+    torrent_path = sys.argv[2]
+    output_path = sys.argv[3]
+
+    # All clients run on localhost; only the port differentiates them.
+    listen_ip = "127.0.0.1"
 
     # Load metadata
     meta = TorrentMetadata(torrent_path)
@@ -97,14 +101,23 @@ def main():
     piece_manager = PieceManager(num_pieces)
     file_manager = FileManager(output_path, meta)
 
+    # Bootstrap PieceManager from what FileManager found on disk. If the
+    # output file is already complete and matches the torrent (seeder),
+    # FileManager.scan_existing_pieces() will have marked its internal
+    # have[] array accordingly, and we mirror that into PieceManager so
+    # our bitfield and all_complete() reflect the correct initial state.
+    for i in range(num_pieces):
+        if file_manager.has_piece(i):
+            piece_manager.mark_have(i)
+
     # Generate peer_id
     peer_id = random_peer_id()
     print("[CLIENT] Our peer_id:", peer_id)
 
     # Start peer server for incoming peers
     server = PeerServer(
-        ip=LISTEN_IP,
-        port=LISTEN_PORT,
+        ip=listen_ip,
+        port=listen_port,
         metadata=meta,
         peer_id=peer_id,
         piece_manager=piece_manager,
@@ -114,15 +127,18 @@ def main():
 
     # Ask tracker for peers
     try:
-        peers = announce_to_tracker(meta, peer_id, LISTEN_PORT)
+        peers, interval = announce_to_tracker(meta, peer_id, listen_port)
     except Exception as e:
         print("[CLIENT] Tracker error:", e)
         peers = []
+        interval = 30
 
     # Filter out ourselves (if tracker gave us back our own address)
     peers = list({(ip, port) for ip, port in peers})
-    peers = [(ip, port) for ip, port in peers if not (ip == LISTEN_IP and port == LISTEN_PORT)]
+    peers = [(ip, port) for ip, port in peers if not (ip == listen_ip and port == listen_port)]
     print(f"[CLIENT] Tracker returned {len(peers)} peers:", peers)
+
+    next_announce_at = time.time() + interval
 
     connections = []
     for ip, port in peers:
@@ -147,21 +163,68 @@ def main():
 
     max_rounds = 1000
     round_delay = 0.2
+    completed = False
 
     for round_no in range(max_rounds):
-        if all(piece_manager.have):
+        now = time.time()
+        if now >= next_announce_at:
+            try:
+                new_peers, interval = announce_to_tracker(meta, peer_id, listen_port)
+                next_announce_at = now + interval
+
+                # Merge in any newly discovered peers (avoid duplicates and ourselves)
+                new_peers = list({(ip, port) for ip, port in new_peers})
+                new_peers = [
+                    (ip, port)
+                    for ip, port in new_peers
+                    if not (ip == listen_ip and port == listen_port)
+                ]
+
+                existing_addrs = {(c.client_addr[0], c.client_addr[1]) for c in connections}
+                for ip, port in new_peers:
+                    if (ip, port) in existing_addrs:
+                        continue
+                    try:
+                        conn = connect_to_peer(
+                            ip,
+                            port,
+                            meta,
+                            peer_id,
+                            piece_manager,
+                            file_manager=file_manager,
+                        )
+                        connections.append(conn)
+                        existing_addrs.add((ip, port))
+                        print(f"[CLIENT] Connected to new peer from tracker: {(ip, port)}")
+                    except Exception as e:
+                        print(f"[CLIENT] Failed to connect to {ip}:{port} from periodic announce -> {e}")
+
+            except Exception as e:
+                print("[CLIENT] Periodic tracker announce failed:", e)
+
+        if piece_manager.all_complete():
             print(f"[ENGINE] All pieces downloaded in {round_no} rounds!")
+            completed = True
             break
 
         made_request = False
+        dead_connections = []
+
+        # Take a thread-safe snapshot of our local have[] state for this round.
+        local_have = piece_manager.snapshot_have()
 
         for conn in connections[:]:
+            # If the underlying PeerConnection thread is no longer alive, drop it.
+            if not conn.is_alive():
+                dead_connections.append(conn)
+                continue
+
             if conn.remote_have is None:
                 continue
 
             piece_to_request = None
             for index in range(num_pieces):
-                if not piece_manager.have[index] and conn.remote_have[index]:
+                if not local_have[index] and conn.remote_have[index]:
                     piece_to_request = index
                     break
 
@@ -172,15 +235,45 @@ def main():
                     made_request = True
                 except Exception as e:
                     print(f"[ENGINE] Failed to request piece {piece_to_request} from {conn.client_addr}: {e}")
+                    dead_connections.append(conn)
+
+        # Remove any dead/broken connections from our active list.
+        for dc in dead_connections:
+            if dc in connections:
+                connections.remove(dc)
+                print(f"[ENGINE] Dropped dead connection to {dc.client_addr}")
 
         time.sleep(round_delay)
 
     else:
         print("[ENGINE] Download loop hit max_rounds without completing.")
 
-    print("\n[ENGINE] Final have[] =", piece_manager.have)
-    have_count = sum(1 for h in piece_manager.have if h)
+    final_have = piece_manager.snapshot_have()
+    print("\n[ENGINE] Final have[] =", final_have)
+    have_count = sum(1 for h in final_have if h)
     print(f"[ENGINE] Pieces complete: {have_count}/{num_pieces}")
+
+    # If we completed the download, stay up as a seeder so other peers can fetch pieces.
+    if completed and all(final_have):
+        print("\n[SEED] Download complete. Staying online to seed.")
+        print("[SEED] Press Ctrl+C to stop seeding and shut down the client.\n")
+        try:
+            while True:
+                try:
+                    # Announce to the tracker as a completed peer so new leechers can discover us.
+                    announce_to_tracker(meta, peer_id, listen_port, status="completed")
+                except Exception as e:
+                    print(f"[SEED] Tracker announce failed: {e}")
+                # Sleep for a while before the next announce. This does not block peer threads.
+                time.sleep(30.0)
+        except KeyboardInterrupt:
+            print("\n[SEED] Stopping seeding on user request...")
+
+    # Tell the tracker we are leaving the swarm.
+    try:
+        announce_to_tracker(meta, peer_id, listen_port, status="stopped")
+    except Exception as e:
+        print(f"[CLIENT] Failed to send stopped announce: {e}")
 
     print("[CLIENT] Stopping server...")
     server.stop()

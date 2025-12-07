@@ -4,7 +4,7 @@ import bencodepy
 
 
 class TorrentMetadata:
-    def __init__(self, torrent_path: str):
+    def __init__(self, torrent_path):
         # Load and parse .torrent file using bencodepy
         with open(torrent_path, "rb") as f:
             raw = f.read()
@@ -13,7 +13,7 @@ class TorrentMetadata:
 
         # Most keys are bytes
         info = meta[b"info"]
-        announce = meta[b"announce"]
+        # announce = meta[b"announce"]
 
         # Compute info_hash (MUST be bencoded EXACTLY as stored)
         info_bencoded = bencodepy.encode(info)
@@ -21,7 +21,7 @@ class TorrentMetadata:
         self.info_hash_hex = self.info_hash_bytes.hex()
 
         # Tracker URL
-        self.announce = announce.decode("utf-8")
+        self.announce = "http://127.0.0.1:6969/announce" # tracker.py (port MUST be 6969)
 
         # Single-file torrent fields
         self.name = info[b"name"].decode("utf-8")

@@ -73,7 +73,10 @@ def handle_announce(path, peer_ip):
         existing_peer["ip"] = peer_ip
         existing_peer["port"] = peer_port
         existing_peer["status"] = status
-        existing_peer["last_announce"] = now
+        # Only update last_announce if the peer is not explicitly stopping;
+        # this allows the TIMEOUT-based cleanup to prune stopped peers naturally.
+        if status != "stopped":
+            existing_peer["last_announce"] = now
     else:
         # Add new peer
         peers.append(
@@ -90,6 +93,7 @@ def handle_announce(path, peer_ip):
     response_peers = [
         {"peer_id": p["peer_id"], "ip": p["ip"], "port": p["port"]}
         for p in peers
+        if p.get("status") != "stopped"
     ]
 
     return 200, {"interval": INTERVAL, "peers": response_peers}
@@ -154,10 +158,10 @@ def run_tracker(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        s.bind(("0.0.0.0", port))
+        s.bind(("127.0.0.1", port))
         s.listen(50)
         
-        print(f"RUNNING: Tracker listening on 0.0.0.0:{port}!")
+        print(f"RUNNING: Tracker listening on 127.0.0.1:{port}!")
 
         while True:
             conn, addr = s.accept()
@@ -182,10 +186,9 @@ def run_tracker(port):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <port>")
-        sys.exit(1)
-    port = int(sys.argv[1])
+    # Fixed port: 6969
+    port = 6969
+    print(f"[TRACKER] Using fixed port {port}")
     run_tracker(port)
 
 

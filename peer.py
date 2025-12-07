@@ -21,15 +21,24 @@ class PieceManager:
         self.num_pieces = num_pieces
         # True if we have the piece at that index
         self.have = [False] * num_pieces  # Start off as a leecher
+        # Lock to synchronize access to the shared have[] list across threads
+        self._lock = threading.Lock()
 
     def mark_have(self, index):
         if 0 <= index < self.num_pieces:
-            self.have[index] = True
+            # Synchronize updates to the shared have[] list
+            with self._lock:
+                self.have[index] = True
 
     def bitfield_bytes(self):
         """Return a compact bitfield: 1 bit per piece (MSB-first)."""
+        # Take a snapshot of have[] under the lock so iteration sees a
+        # consistent view even while other threads are marking pieces.
+        with self._lock:
+            have_snapshot = list(self.have)
+
         bits = []
-        for have_piece in self.have:
+        for have_piece in have_snapshot:
             bits.append('1' if have_piece else '0')
         # Pad to a multiple of 8 bits
         while len(bits) % 8 != 0:
@@ -39,6 +48,16 @@ class PieceManager:
             byte_bits = ''.join(bits[i:i+8])
             result.append(int(byte_bits, 2))
         return bytes(result)
+
+    def snapshot_have(self):
+        """Return a copy of the current have[] list under the lock."""
+        with self._lock:
+            return list(self.have)
+
+    def all_complete(self):
+        """Return True if we have all pieces (thread-safe)."""
+        with self._lock:
+            return all(self.have)
 
     @staticmethod
     def parse_bitfield(b, num_pieces):
@@ -289,7 +308,7 @@ class PeerConnection(threading.Thread):
                                 )
                     continue
 
-                # TODO: Handle other message types (REQUEST, PIECE)
+                # TODO: Handle other message types here
 
                 print(
                     f"[Peer {self.server_peer_id}] [Peer connection] Received message type {message_type} "
