@@ -4,12 +4,43 @@ import sys
 import json
 from urllib.parse import urlparse, parse_qs
 
+import time
+
 INTERVAL = 30  # seconds until next announce
+TIMEOUT = 120  # seconds without announce before a peer is considered dead
 
 torrents = {}
 
+def cleanup_peers():
+    """Remove peers that have not announced recently and log active torrents."""
+    now = time.time()
+    to_delete = []
+
+    for info_hash, peers in torrents.items():
+        # Filter out stale peers
+        alive = []
+        for p in peers:
+            last = p.get("last_announce", 0)
+            if now - last <= TIMEOUT:
+                alive.append(p)
+        if alive:
+            torrents[info_hash] = alive
+        else:
+            to_delete.append(info_hash)
+
+    for ih in to_delete:
+        del torrents[ih]
+
+    # Log active torrents and participating peers
+    if torrents:
+        print("[TRACKER] Active torrents:")
+        for info_hash, peers in torrents.items():
+            print(f"  info_hash={info_hash} peers={len(peers)}")
+    else:
+        print("[TRACKER] No active torrents")
+
 def handle_announce(path, peer_ip):
-    """Handle URL /announce?info_hash=...&peer_id=...&peer_port=..."""
+    """Handle URL /announce?info_hash=...&peer_id=...&peer_port=...&status=..."""
 
     parsedUrl = urlparse(path)
     urlQuery = parse_qs(parsedUrl.query)
@@ -17,6 +48,7 @@ def handle_announce(path, peer_ip):
     info_hash = urlQuery.get("info_hash", [None])[0]
     peer_id = urlQuery.get("peer_id", [None])[0]
     peer_port = urlQuery.get("peer_port", [None])[0]
+    status = urlQuery.get("status", ["started"])[0]
 
     if not info_hash or not peer_id or not peer_port:
         return 400, {"error": "Missing required parameters"}
@@ -29,7 +61,7 @@ def handle_announce(path, peer_ip):
     # Get or create the list of peers for the info_hash
     peers = torrents.setdefault(info_hash, [])
 
-    # Check if peer already exists in dictionary
+    now = time.time()
     existing_peer = None
     for peer in peers:
         if peer["peer_id"] == peer_id:
@@ -40,11 +72,27 @@ def handle_announce(path, peer_ip):
         # Update existing peer info
         existing_peer["ip"] = peer_ip
         existing_peer["port"] = peer_port
+        existing_peer["status"] = status
+        existing_peer["last_announce"] = now
     else:
         # Add new peer
-        peers.append({"peer_id": peer_id, "ip": peer_ip, "port": peer_port})
+        peers.append(
+            {
+                "peer_id": peer_id,
+                "ip": peer_ip,
+                "port": peer_port,
+                "status": status,
+                "last_announce": now,
+            }
+        )
 
-    return 200, {"interval": INTERVAL, "peers": peers}
+    # Build a response
+    response_peers = [
+        {"peer_id": p["peer_id"], "ip": p["ip"], "port": p["port"]}
+        for p in peers
+    ]
+
+    return 200, {"interval": INTERVAL, "peers": response_peers}
 
 def read_http_request(socket):
     """Read an HTTP request from a TCP socket and return the request method and path/URL."""
@@ -94,7 +142,7 @@ def send_http_response(socket, status_code, body_dict):
         f"HTTP/1.1 {status_code} {reason}",
         "Content-Type: application/json",
         f"Content-Length: {len(body_json)}",
-        "Connection: close",  # Server will close connection
+        "Connection: close",  # Tracker server will close connection
         "",
         body_json
     ]
@@ -127,6 +175,7 @@ def run_tracker(port):
 
                 status, body = handle_announce(path, client_ip)
                 send_http_response(conn, status, body)
+                cleanup_peers()
 
 
 def main():
