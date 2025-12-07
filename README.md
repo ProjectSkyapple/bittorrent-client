@@ -1,5 +1,4 @@
 # Simple BitTorrent Client
-Final project for CS 4390 (Computer Networks)
 
 This project implements a simple peer-to-peer BitTorrent client consisting of:
 
@@ -9,8 +8,6 @@ This project implements a simple peer-to-peer BitTorrent client consisting of:
 - A PieceManager and FileManager for tracking, writing, and verifying pieces
 
 A peer loads a `.torrent` file, announces to the tracker, discovers peers, downloads pieces concurrently, verifies them using SHA1 hashing, and transitions into seeding mode once complete. The system runs entirely on localhost using unique port numbers to simulate multiple peers.
-
----
 
 ## 1. File Structure
 
@@ -25,13 +22,11 @@ bittorrent-client/
 ├── README.md             # Project documentation
 ```
 
----
-
 ## 2. How to Run
 
 ### 2.0 Install dependencies
 
-This project requires dependences that are not built into Python 3: `bencodepy` for parsing bencoded content, `requests` for simplifying making HTTP GET requests to the tracker
+This project requires dependences that are not built into Python 3: `bencodepy` for parsing bencoded content, and `requests` for simplifying making HTTP GET requests to the tracker:
 
 ```bash
 pip install bencodepy
@@ -56,8 +51,6 @@ Expected output:
 [TRACKER] Using fixed port 6969
 ```
 
----
-
 ### 2.2 Start a peer (seeder or leecher)
 
 Each peer is started using:
@@ -74,8 +67,6 @@ Where:
   - If this file already contains valid SHA1-verified pieces, the peer starts as a **seeder**
   - Otherwise, it behaves as a **leecher**
 
----
-
 ### 2.3 Example
 
 Seeder (must have the complete file) (the torrent file for _Alice_ is located in the `test_leecher_files` directory):
@@ -89,8 +80,6 @@ Leecher:
 ```bash
 python3 client.py 6882 ./test_leecher_files/alice.torrent ./alice_download-peer2
 ```
-
----
 
 ### 2.4 Another example: Running multiple peers
 
